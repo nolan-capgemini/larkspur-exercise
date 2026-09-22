@@ -11,14 +11,43 @@ Steps and gates:  https://anthropicpartnerbasecamp.bts.com/
 from __future__ import annotations
 from typing import Any, Dict, List
 from support import (MODEL, SYSTEM_PROMPT, call_local, execute_tool, mcp_client,
-                     new_session, next_available_day, record_tool_result,
-                     runtime_preamble)
+                     mock_backend, new_session, record_tool_result, runtime_preamble)
+from support import next_available_day as _raw_next_available_day
 
 MAX_TOOL_CALLS = 8  # Larkspur's own build capped the loop here; then a human takes over.
 
+
+def next_available_day(pnr):
+    """Wraps the given next_available_day(origin, dest, date, cabin) so Claude
+    only has to pass a pnr; origin/dest/date/cabin are derived from the
+    booking's disrupted segment, the same way search_alternatives does."""
+    try:
+        booking = mock_backend.get_booking_raw(pnr)
+    except mock_backend.NotFound as e:
+        return {"error": str(e)}
+    seg = mock_backend.get_disrupted_segment(booking)
+    return {"date": _raw_next_available_day(seg["origin"], seg["dest"], seg["date"], seg["cabin"])}
+
+
 TONE_ADDENDUM = ""                       # ✏️ Build 4, step 4.1, intelligence goal
-EXTRA_TOOLS: List[Dict[str, Any]] = []   # ✏️ Build 2, step 2.1: schemas for the tools you add
-LOCAL_TOOLS: Dict[str, Any] = {}         # ✏️ Build 2, step 2.1: the functions behind them
+EXTRA_TOOLS: List[Dict[str, Any]] = [     # ✏️ Build 2, step 2.1: schemas for the tools you add
+    {
+        "name": "next_available_day",
+        "description": (
+            "Return the earliest date a seat is available on this customer's disrupted "
+            "route. Call this instead of search_alternatives when the customer just "
+            "needs the soonest possible rebooking date rather than a full list of "
+            "flight options. Takes only a pnr; origin, destination, and date are "
+            "derived from the booking, the same as search_alternatives."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"pnr": {"type": "string"}},
+            "required": ["pnr"],
+        },
+    },
+]
+LOCAL_TOOLS: Dict[str, Any] = {"next_available_day": next_available_day}  # ✏️ Build 2, step 2.1: the functions behind them
 
 
 def text_of(response) -> str:
@@ -117,14 +146,22 @@ def build_tools() -> List[Dict[str, Any]]:                 # ✏️ Build 1, ste
                 "type": "object",
                 "properties": {
                     "flight_no": {"type": "string"},
-                    "date": {"type": "string", "description": "MM/DD/YYYY"},
+                    "date": {"type": "string", "description": "YYYY-MM-DD"},
                 },
                 "required": ["flight_no", "date"],
             },
         },
         {
             "name": "search_alternatives",
-            "description": "search",
+            "description": (
+                "Search for alternative Larkspur flights on the customer's disrupted "
+                "route and date, so they can be rebooked. Re-derives origin, destination, "
+                "date, and cabin from the booking itself (like check_policy does) rather "
+                "than taking them as arguments, so it cannot be pointed at the wrong route. "
+                "Returns up to 7 ranked options with seat availability, plus any excluded "
+                "options and why. Call this once you know the disruption is real and the "
+                "customer wants to see rebooking choices, not just the earliest date."
+            ),
             "input_schema": {
                 "type": "object",
                 "properties": {"pnr": {"type": "string"}},
