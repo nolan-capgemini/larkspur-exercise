@@ -1,10 +1,14 @@
-# Team: Capgemini 15
+# Team: Larkspur Disruptors
+
 Whoever made the repo types the team name above and one name per line below,
 then commits it once. Nobody else has to touch this file.
 
 The review reads these names. Nothing else comes off the list. Your team still
 decides in the moment who does what.
 
-- <Nolan>
-- <Name>
-- <Name>
+- Nolan Blevins
+- Manish Aggarwal
+- Jay Hinspeter
+- Seb M
+- Prabaharan Rajendran
+- SKN
