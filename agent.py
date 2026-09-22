@@ -13,6 +13,7 @@ from typing import Any, Dict, List
 from support import (MODEL, SYSTEM_PROMPT, call_local, execute_tool, mcp_client,
                      mock_backend, new_session, record_tool_result, runtime_preamble)
 from support import next_available_day as _raw_next_available_day
+from support.tools import check_policy as _check_policy
 
 MAX_TOOL_CALLS = 8  # Larkspur's own build capped the loop here; then a human takes over.
 
@@ -27,6 +28,21 @@ def next_available_day(pnr):
         return {"error": str(e)}
     seg = mock_backend.get_disrupted_segment(booking)
     return {"date": _raw_next_available_day(seg["origin"], seg["dest"], seg["date"], seg["cabin"])}
+
+
+def care_entitlements(pnr, cause_code, delay_minutes, status,
+                       wait_minutes_for_alternative=None, chosen_option_id=None):
+    """Just the meal/hotel/ground/goodwill slice of check_policy's answer, for
+    a customer who is only asking what they're owed for care, not the full
+    rebooking-waiver-and-refund resolution. Runs the same resolver, same
+    guardrail: fare_family and loyalty_tier are never arguments, both come
+    off the booking."""
+    result = _check_policy(pnr, cause_code, delay_minutes, status,
+                            wait_minutes_for_alternative, chosen_option_id)
+    if "error" in result:
+        return result
+    return {"policy_row_id": result["policy_row_id"], "care": result["care"],
+            "goodwill": result["goodwill"]}
 
 
 TONE_ADDENDUM = ""                       # ✏️ Build 4, step 4.1, intelligence goal
@@ -46,8 +62,34 @@ EXTRA_TOOLS: List[Dict[str, Any]] = [     # ✏️ Build 2, step 2.1: schemas fo
             "required": ["pnr"],
         },
     },
+    {
+        "name": "care_entitlements",
+        "description": (
+            "Look up only the meal, hotel, ground, and goodwill entitlements for this "
+            "disruption, without the full rebooking waiver and refund resolution "
+            "check_policy also returns. Use it when the customer's question is just "
+            "'what do I get for this', not when you're working out rebooking or refund "
+            "options too. cause_code, delay_minutes and status come from get_flight_status; "
+            "fare_family and loyalty_tier are looked up from the booking, not asked of you."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pnr": {"type": "string"},
+                "cause_code": {"type": "string", "enum": ["WX", "ATC", "MX", "CREW", "SEC"]},
+                "delay_minutes": {"type": "integer"},
+                "status": {"type": "string", "enum": ["ON_TIME", "DELAYED", "CANCELLED", "DIVERTED"]},
+                "wait_minutes_for_alternative": {"type": "integer"},
+                "chosen_option_id": {"type": "string"},
+            },
+            "required": ["pnr", "cause_code", "delay_minutes", "status"],
+        },
+    },
 ]
-LOCAL_TOOLS: Dict[str, Any] = {"next_available_day": next_available_day}  # ✏️ Build 2, step 2.1: the functions behind them
+LOCAL_TOOLS: Dict[str, Any] = {           # ✏️ Build 2, step 2.1: the functions behind them
+    "next_available_day": next_available_day,
+    "care_entitlements": care_entitlements,
+}
 
 
 def text_of(response) -> str:
