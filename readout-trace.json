@@ -6,17 +6,17 @@
     "get_flight_status",
     "check_policy"
   ],
-  "saw_thinking": true,
+  "saw_thinking": false,
   "used_format": false,
   "used_tool_choice_none": false,
   "streamed": false,
   "deltas_seen": 0,
   "tokens": {
-    "input": 15475,
-    "output": 677,
-    "cache_read": 0,
+    "input": 5686,
+    "output": 523,
+    "cache_read": 12792,
     "cache_write": 0
   },
-  "cache_hit_ratio": null,
-  "elapsed": 17.0
+  "cache_hit_ratio": 0.6922827145795,
+  "elapsed": 10.5
 }

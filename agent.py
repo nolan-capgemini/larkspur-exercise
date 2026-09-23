@@ -11,50 +11,59 @@ Steps and gates:  https://anthropicpartnerbasecamp.bts.com/
 from __future__ import annotations
 from typing import Any, Dict, List
 from support import (MODEL, SYSTEM_PROMPT, call_local, execute_tool, mcp_client,
-                     new_session, record_tool_result, runtime_preamble)
+                     mock_backend, new_session, record_tool_result, runtime_preamble)
 from support.tools import check_policy as _check_policy
 
 MAX_TOOL_CALLS = 8  # Larkspur's own build capped the loop here; then a human takes over.
 
 
-def care_entitlements(pnr, cause_code, delay_minutes, status,
-                       wait_minutes_for_alternative=None, chosen_option_id=None):
-    """Just the meal/hotel/ground/goodwill slice of check_policy's answer, for
-    a customer who is only asking what they're owed for care, not the full
-    rebooking-waiver-and-refund resolution. Runs the same resolver, same
-    guardrail: fare_family and loyalty_tier are never arguments, both come
-    off the booking."""
-    result = _check_policy(pnr, cause_code, delay_minutes, status,
-                            wait_minutes_for_alternative, chosen_option_id)
+def care_entitlements(pnr):
+    """The meal/hotel/ground/goodwill slice of check_policy's answer, for a
+    customer who is only asking what they're owed for care. Structurally
+    different from check_policy, not just a narrower description of it:
+    cause_code, delay_minutes and status are pulled from get_flight_status
+    here, inside the tool, so pnr is the only input. check_policy still
+    requires those three because it needs them to also resolve rebooking and
+    refund, which this tool never touches."""
+    try:
+        booking = mock_backend.get_booking_raw(pnr)
+    except mock_backend.NotFound as e:
+        return {"error": str(e)}
+    seg = mock_backend.get_disrupted_segment(booking)
+    flight = mock_backend.get_flight_status_raw(seg["flight_no"], seg["date"])
+    if "error" in flight:
+        return flight
+    result = _check_policy(pnr, flight["cause_code"], flight["delay_min"], flight["status"])
     if "error" in result:
         return result
     return {"policy_row_id": result["policy_row_id"], "care": result["care"],
             "goodwill": result["goodwill"]}
 
 
-TONE_ADDENDUM = ""                       # ✏️ Build 4, step 4.1, intelligence goal
+TONE_ADDENDUM = (                        # ✏️ Build 4, step 4.1, intelligence goal
+    "\n\nIf a customer is abusive or threatens legal action, do not proceed with a "
+    "normal entitlements or status rundown as though nothing was said. Acknowledge "
+    "the complaint once, in one sentence, promise nothing, and escalate to a human "
+    "via escalate_to_human before doing anything else."
+    "\n\nKeep the final reply short: state the facts and the entitlement, ask at "
+    "most one follow-up question, and skip a restated summary of what you just said."
+)
 EXTRA_TOOLS: List[Dict[str, Any]] = [     # ✏️ Build 2, step 2.1: schemas for the tools you add
     {
         "name": "care_entitlements",
         "description": (
             "Look up only the meal, hotel, ground, and goodwill entitlements for this "
             "disruption, without the full rebooking waiver and refund resolution "
-            "check_policy also returns. Use it when the customer's question is just "
-            "'what do I get for this', not when you're working out rebooking or refund "
-            "options too. cause_code, delay_minutes and status come from get_flight_status; "
-            "fare_family and loyalty_tier are looked up from the booking, not asked of you."
+            "check_policy also returns. Takes only a pnr: unlike check_policy, this tool "
+            "checks the flight's current status itself, so you do not need to have already "
+            "called get_flight_status or know the cause_code, delay_minutes, or status "
+            "yourself. Use it when the customer's question is just 'what do I get for this', "
+            "before you have (or need) the full disruption picture."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {
-                "pnr": {"type": "string"},
-                "cause_code": {"type": "string", "enum": ["WX", "ATC", "MX", "CREW", "SEC"]},
-                "delay_minutes": {"type": "integer"},
-                "status": {"type": "string", "enum": ["ON_TIME", "DELAYED", "CANCELLED", "DIVERTED"]},
-                "wait_minutes_for_alternative": {"type": "integer"},
-                "chosen_option_id": {"type": "string"},
-            },
-            "required": ["pnr", "cause_code", "delay_minutes", "status"],
+            "properties": {"pnr": {"type": "string"}},
+            "required": ["pnr"],
         },
     },
 ]
@@ -98,12 +107,15 @@ def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏�
     """Run the tool loop until Claude stops asking for tools. Return its final text."""
     client, tracer = new_session()
     tools = tool_list()
+    if tools:  # cache breakpoint: system + tools are identical every turn, cache
+        # them once instead of paying full price on every messages.create() call.
+        tools = tools[:-1] + [{**tools[-1], "cache_control": {"type": "ephemeral"}}]
     messages = [
         {"role": "user", "content": f"PNR {pnr}, last name {last_name}. {message}"},
     ]
 
     response = client.messages.create(
-        model=MODEL, max_tokens=4096, system=runtime_preamble() + SYSTEM_PROMPT + TONE_ADDENDUM,
+        model=MODEL, max_tokens=1024, system=runtime_preamble() + SYSTEM_PROMPT + TONE_ADDENDUM,
         thinking={"type": "adaptive"}, tools=tools, messages=messages,
     )
 
@@ -112,7 +124,7 @@ def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏�
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results(response)})
         response = client.messages.create(
-            model=MODEL, max_tokens=4096, system=runtime_preamble() + SYSTEM_PROMPT + TONE_ADDENDUM,
+            model=MODEL, max_tokens=1024, system=runtime_preamble() + SYSTEM_PROMPT + TONE_ADDENDUM,
             thinking={"type": "adaptive"}, tools=tools, messages=messages,
         )
         turns += 1
@@ -173,7 +185,11 @@ def build_tools() -> List[Dict[str, Any]]:                 # ✏️ Build 1, ste
                 "than taking them as arguments, so it cannot be pointed at the wrong route. "
                 "Returns up to 7 ranked options with seat availability, plus any excluded "
                 "options and why. Call this once you know the disruption is real and the "
-                "customer wants to see rebooking choices, not just the earliest date."
+                "customer wants to see rebooking choices, not just the earliest date. This "
+                "tool does not depend on check_policy's result or the reverse: once you know "
+                "the disruption is real (from get_flight_status), call this alongside "
+                "check_policy in the same turn rather than waiting for one before starting "
+                "the other, when the customer's question needs both."
             ),
             "input_schema": {
                 "type": "object",
@@ -185,8 +201,12 @@ def build_tools() -> List[Dict[str, Any]]:                 # ✏️ Build 1, ste
             "name": "check_policy",
             "description": (
                 "Resolve what Larkspur owes this customer for the disruption: rebooking "
-                "waiver, refund path, meal/hotel/ground care, goodwill eligibility and cap, "
-                "and any escalation triggers. cause_code, delay_minutes and status describe "
+                "waiver, refund path, and any escalation triggers. If the customer is asking "
+                "only about meal, hotel, ground, or goodwill entitlements, with no rebooking "
+                "or refund question in play, use care_entitlements instead — that tool "
+                "answers the care question alone, and needs only a pnr, none of the fields "
+                "this one requires. Reach for this tool once rebooking or a refund is part of "
+                "what the customer is asking. cause_code, delay_minutes and status describe "
                 "what get_flight_status told you; fare_family, loyalty_tier and whether this "
                 "is overnight are looked up from the booking, not asked of you. Every "
                 "response carries a policy_row_id. Cite it if you reference this decision "
