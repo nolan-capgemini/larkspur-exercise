@@ -11,23 +11,10 @@ Steps and gates:  https://anthropicpartnerbasecamp.bts.com/
 from __future__ import annotations
 from typing import Any, Dict, List
 from support import (MODEL, SYSTEM_PROMPT, call_local, execute_tool, mcp_client,
-                     mock_backend, new_session, record_tool_result, runtime_preamble)
-from support import next_available_day as _raw_next_available_day
+                     new_session, record_tool_result, runtime_preamble)
 from support.tools import check_policy as _check_policy
 
 MAX_TOOL_CALLS = 8  # Larkspur's own build capped the loop here; then a human takes over.
-
-
-def next_available_day(pnr):
-    """Wraps the given next_available_day(origin, dest, date, cabin) so Claude
-    only has to pass a pnr; origin/dest/date/cabin are derived from the
-    booking's disrupted segment, the same way search_alternatives does."""
-    try:
-        booking = mock_backend.get_booking_raw(pnr)
-    except mock_backend.NotFound as e:
-        return {"error": str(e)}
-    seg = mock_backend.get_disrupted_segment(booking)
-    return {"date": _raw_next_available_day(seg["origin"], seg["dest"], seg["date"], seg["cabin"])}
 
 
 def care_entitlements(pnr, cause_code, delay_minutes, status,
@@ -47,21 +34,6 @@ def care_entitlements(pnr, cause_code, delay_minutes, status,
 
 TONE_ADDENDUM = ""                       # ✏️ Build 4, step 4.1, intelligence goal
 EXTRA_TOOLS: List[Dict[str, Any]] = [     # ✏️ Build 2, step 2.1: schemas for the tools you add
-    {
-        "name": "next_available_day",
-        "description": (
-            "Return the earliest date a seat is available on this customer's disrupted "
-            "route. Call this instead of search_alternatives when the customer just "
-            "needs the soonest possible rebooking date rather than a full list of "
-            "flight options. Takes only a pnr; origin, destination, and date are "
-            "derived from the booking, the same as search_alternatives."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {"pnr": {"type": "string"}},
-            "required": ["pnr"],
-        },
-    },
     {
         "name": "care_entitlements",
         "description": (
@@ -87,7 +59,6 @@ EXTRA_TOOLS: List[Dict[str, Any]] = [     # ✏️ Build 2, step 2.1: schemas fo
     },
 ]
 LOCAL_TOOLS: Dict[str, Any] = {           # ✏️ Build 2, step 2.1: the functions behind them
-    "next_available_day": next_available_day,
     "care_entitlements": care_entitlements,
 }
 
@@ -152,7 +123,7 @@ def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏�
 def tool_list() -> List[Dict[str, Any]]:                   # ✏️ Build 2, step 2.2
     """Given. Exactly what Claude is offered on every turn; run.py --show-tools
     prints this list."""
-    return build_tools() + EXTRA_TOOLS
+    return build_tools() + EXTRA_TOOLS + mcp_client.tools()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
